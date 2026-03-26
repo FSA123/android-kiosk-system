@@ -1,0 +1,13 @@
+# Excludem folderul media (fisierele video/foto sunt prea mari pentru Git)
+media/
+!media/.gitkeep
+
+# Excludem log-urile de text (sunt date de test locale)
+*.txt
+!README.md
+
+# Excludem fisierele de configurare ale editorului sau sistemului
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
