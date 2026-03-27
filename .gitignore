@@ -6,6 +6,11 @@ media/
 *.txt
 !README.md
 
+# SQLite database files (generated at runtime via db/init_db.php)
+db/kiosk.db
+db/kiosk.db-shm
+db/kiosk.db-wal
+
 # Excludem fisierele de configurare ale editorului sau sistemului
 .DS_Store
 Thumbs.db

@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<!--
+  tablet/player.html – Offline-First Kiosk Media Player
+  ========================================================
+  Capabilities:
+    • Fetches playlist from /get_playlist.php and caches it in localStorage.
+    • Plays images (configurable duration) and videos in a loop.
+    • Falls back to the last cached playlist when offline.
+    • Sends playback logs to /receive_logs.php (queues them offline).
+    • Sends heartbeat PINGs to /heartbeat.php every 60 s.
+    • Polls /api/poll_commands.php every 20 s for remote commands.
+
+  Configuration: edit the KIOSK_CONFIG block below.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kiosk Player</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html, body {
+            width: 100%; height: 100%;
+            background: #000;
+            overflow: hidden;
+            cursor: none;
+        }
+
+        #player-container {
+            width: 100%; height: 100%;
+            position: relative;
+        }
+
+        /* Two layers: A shown while B loads, then swapped */
+        .media-layer {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            object-fit: contain;
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            background: #000;
+        }
+        .media-layer.active { opacity: 1; }
+
+        /* Offline banner */
+        #offline-banner {
+            display: none;
+            position: fixed;
+            bottom: 16px; right: 16px;
+            background: rgba(234,67,53,.85);
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-family: sans-serif;
+            font-size: .85rem;
+            z-index: 100;
+        }
+        body.offline #offline-banner { display: block; }
+    </style>
+</head>
+<body>
+
+<div id="player-container">
+    <img  id="layerA" class="media-layer" src="" alt="">
+    <video id="layerB" class="media-layer" muted playsinline></video>
+</div>
+
+<div id="offline-banner">📶 Offline – cached playlist</div>
+
+<script>
+// ── Configuration ──────────────────────────────────────────────────────────
+const KIOSK_CONFIG = {
+    deviceId:        'tablet-01',          // Unique identifier for this device
+    deviceName:      'Lobby Kiosk',        // Human-readable label
+    serverBase:      '',                   // Base URL of the PC server (empty = same origin)
+    imageDuration:   8000,                 // ms to show each image
+    syncInterval:    300_000,              // ms between playlist refreshes (5 min)
+    heartbeatInterval: 60_000,            // ms between heartbeat pings (60 s)
+    commandPollInterval: 20_000,          // ms between command polls (20 s)
+    logFlushInterval:    10_000,          // ms between offline-log-flush attempts (10 s)
+};
+
+// ── State ──────────────────────────────────────────────────────────────────
+let playlist      = [];
+let currentIndex  = 0;
+let activeLayer   = 'A'; // 'A' or 'B'
+let playTimer     = null;
+let offlineQueue  = JSON.parse(localStorage.getItem('kiosk_log_queue') || '[]');
+
+// ── DOM references ─────────────────────────────────────────────────────────
+const imgEl   = document.getElementById('layerA');
+const vidEl   = document.getElementById('layerB');
+const banner  = document.getElementById('offline-banner');
+
+// ── Online / offline detection ─────────────────────────────────────────────
+window.addEventListener('online',  () => { document.body.classList.remove('offline');  flushOfflineQueue(); });
+window.addEventListener('offline', () => document.body.classList.add('offline'));
+if (!navigator.onLine) document.body.classList.add('offline');
+
+// ── Playlist management ────────────────────────────────────────────────────
+
+async function fetchPlaylist() {
+    try {
+        const res = await fetch(KIOSK_CONFIG.serverBase + '/get_playlist.php', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+            playlist = data;
+            localStorage.setItem('kiosk_playlist', JSON.stringify(data));
+        }
+    } catch (err) {
+        console.warn('[Player] Playlist fetch failed, using cache:', err.message);
+        const cached = localStorage.getItem('kiosk_playlist');
+        if (cached) playlist = JSON.parse(cached);
+    }
+}
+
+// ── Playback engine ────────────────────────────────────────────────────────
+
+function playNext() {
+    if (!playlist.length) {
+        playTimer = setTimeout(playNext, 2000);
+        return;
+    }
+
+    const item = playlist[currentIndex];
+    currentIndex = (currentIndex + 1) % playlist.length;
+
+    if (item.type === 'video') {
+        showVideo(item.src);
+    } else {
+        showImage(item.src);
+    }
+
+    sendLog(item.src);
+}
+
+function showImage(src) {
+    const next = activeLayer === 'A' ? imgEl : makeImg();
+    next.src = src;
+    next.onload = () => {
+        crossfade(next);
+        playTimer = setTimeout(playNext, KIOSK_CONFIG.imageDuration);
+    };
+    next.onerror = () => {
+        console.warn('[Player] Image failed to load:', src);
+        playTimer = setTimeout(playNext, 500);
+    };
+}
+
+function showVideo(src) {
+    vidEl.src = src;
+    vidEl.load();
+    vidEl.oncanplay = () => {
+        crossfade(vidEl);
+        vidEl.play().catch(() => {});
+    };
+    vidEl.onended = playNext;
+    vidEl.onerror = () => {
+        console.warn('[Player] Video failed to load:', src);
+        playTimer = setTimeout(playNext, 500);
+    };
+}
+
+function crossfade(targetEl) {
+    // Deactivate everything
+    imgEl.classList.remove('active');
+    vidEl.classList.remove('active');
+    // Activate target
+    targetEl.classList.add('active');
+}
+
+// img layer helper (reuse imgEl, it covers the image case)
+function makeImg() { return imgEl; }
+
+// ── Logging ────────────────────────────────────────────────────────────────
+
+function sendLog(assetSrc) {
+    const filename = assetSrc.split('/').pop();
+    const payload  = {
+        device_id:   KIOSK_CONFIG.deviceId,
+        device_name: KIOSK_CONFIG.deviceName,
+        asset:       filename,
+        played_at:   new Date().toISOString().replace('T', ' ').slice(0, 19),
+    };
+
+    if (!navigator.onLine) {
+        offlineQueue.push(payload);
+        localStorage.setItem('kiosk_log_queue', JSON.stringify(offlineQueue));
+        return;
+    }
+
+    postForm(KIOSK_CONFIG.serverBase + '/receive_logs.php', payload)
+        .catch(() => {
+            offlineQueue.push(payload);
+            localStorage.setItem('kiosk_log_queue', JSON.stringify(offlineQueue));
+        });
+}
+
+async function flushOfflineQueue() {
+    if (!offlineQueue.length || !navigator.onLine) return;
+    const toSend  = offlineQueue.slice();
+    offlineQueue  = [];
+    localStorage.setItem('kiosk_log_queue', '[]');
+
+    for (const payload of toSend) {
+        try {
+            await postForm(KIOSK_CONFIG.serverBase + '/receive_logs.php', payload);
+        } catch (_) {
+            offlineQueue.push(payload);
+        }
+    }
+    if (offlineQueue.length) {
+        localStorage.setItem('kiosk_log_queue', JSON.stringify(offlineQueue));
+    }
+}
+
+function postForm(url, data) {
+    const body = new URLSearchParams();
+    for (const [k, v] of Object.entries(data)) body.append(k, v);
+    return fetch(url, { method: 'POST', body });
+}
+
+// ── Heartbeat ─────────────────────────────────────────────────────────────
+
+async function sendHeartbeat() {
+    try {
+        await postForm(KIOSK_CONFIG.serverBase + '/heartbeat.php', {
+            device_id:   KIOSK_CONFIG.deviceId,
+            device_name: KIOSK_CONFIG.deviceName,
+        });
+    } catch (_) { /* offline, ignore */ }
+}
+
+// ── Command polling ────────────────────────────────────────────────────────
+
+async function pollCommands() {
+    if (!navigator.onLine) return;
+
+    try {
+        const res  = await fetch(
+            KIOSK_CONFIG.serverBase + '/api/poll_commands.php?device_id=' +
+            encodeURIComponent(KIOSK_CONFIG.deviceId)
+        );
+        const cmds = await res.json();
+
+        for (const cmd of cmds) {
+            await executeCommand(cmd);
+        }
+    } catch (_) { /* ignore */ }
+}
+
+async function executeCommand(cmd) {
+    let status = 'executed';
+    try {
+        switch (cmd.command) {
+            case 'REBOOT':
+                // Android WebView: notify native layer via JS interface if available
+                if (window.AndroidKiosk && window.AndroidKiosk.reboot) {
+                    window.AndroidKiosk.reboot();
+                } else {
+                    location.reload();
+                }
+                break;
+
+            case 'SYNC_NOW':
+            case 'RELOAD_PLAYLIST':
+                clearTimeout(playTimer);
+                await fetchPlaylist();
+                currentIndex = 0;
+                playNext();
+                break;
+
+            case 'CLEAR_CACHE':
+                localStorage.removeItem('kiosk_playlist');
+                localStorage.removeItem('kiosk_log_queue');
+                offlineQueue = [];
+                break;
+
+            default:
+                console.warn('[Player] Unknown command:', cmd.command);
+                status = 'failed';
+        }
+    } catch (e) {
+        console.error('[Player] Command failed:', cmd.command, e);
+        status = 'failed';
+    }
+
+    // Acknowledge
+    try {
+        await fetch(
+            KIOSK_CONFIG.serverBase + '/api/poll_commands.php?device_id=' +
+            encodeURIComponent(KIOSK_CONFIG.deviceId) +
+            '&ack_id=' + cmd.id +
+            '&ack_status=' + status
+        );
+    } catch (_) { /* ignore */ }
+}
+
+// ── Boot sequence ──────────────────────────────────────────────────────────
+
+(async function boot() {
+    await fetchPlaylist();
+    playNext();
+
+    // Periodic playlist refresh
+    setInterval(async () => {
+        await fetchPlaylist();
+    }, KIOSK_CONFIG.syncInterval);
+
+    // Heartbeat
+    sendHeartbeat();
+    setInterval(sendHeartbeat, KIOSK_CONFIG.heartbeatInterval);
+
+    // Command polling
+    pollCommands();
+    setInterval(pollCommands, KIOSK_CONFIG.commandPollInterval);
+
+    // Offline log flushing
+    setInterval(flushOfflineQueue, KIOSK_CONFIG.logFlushInterval);
+})();
+</script>
+
+</body>
+</html>
