@@ -73,6 +73,21 @@ try {
         $ins  = $pdo->prepare("INSERT OR IGNORE INTO assets (filename, filepath, type) VALUES (:fn, :fp, :t)");
         $ins->execute([':fn' => $assetName, ':fp' => 'media/' . $assetName, ':t' => $type]);
         $assetId = (int)$pdo->lastInsertId();
+
+        // INSERT OR IGNORE returns lastInsertId() = 0 when the row already existed
+        // (concurrent request auto-registered the same asset); re-fetch the real ID.
+        if ($assetId === 0) {
+            $assetStmt->execute([':fn' => $assetName]);
+            $refetched = $assetStmt->fetch();
+            $assetId   = $refetched ? (int)$refetched['id'] : 0;
+        }
+
+        if ($assetId === 0) {
+            // Should never happen; bail out to avoid a FK violation in playback_logs.
+            http_response_code(500);
+            echo json_encode(['status' => 'error', 'message' => 'Could not resolve asset ID']);
+            exit;
+        }
     } else {
         $assetId = (int)$asset['id'];
     }

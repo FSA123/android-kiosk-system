@@ -85,7 +85,6 @@ const KIOSK_CONFIG = {
 // ── State ──────────────────────────────────────────────────────────────────
 let playlist      = [];
 let currentIndex  = 0;
-let activeLayer   = 'A'; // 'A' or 'B'
 let playTimer     = null;
 let offlineQueue  = JSON.parse(localStorage.getItem('kiosk_log_queue') || '[]');
 
@@ -138,7 +137,7 @@ function playNext() {
 }
 
 function showImage(src) {
-    const next = activeLayer === 'A' ? imgEl : makeImg();
+    const next = imgEl;
     next.src = src;
     next.onload = () => {
         crossfade(next);
@@ -171,9 +170,6 @@ function crossfade(targetEl) {
     // Activate target
     targetEl.classList.add('active');
 }
-
-// img layer helper (reuse imgEl, it covers the image case)
-function makeImg() { return imgEl; }
 
 // ── Logging ────────────────────────────────────────────────────────────────
 
@@ -268,6 +264,14 @@ async function executeCommand(cmd) {
             case 'SYNC_NOW':
             case 'RELOAD_PLAYLIST':
                 clearTimeout(playTimer);
+                // Stop any in-progress video so its onended won't trigger a
+                // duplicate playNext() call after the playlist is reloaded.
+                vidEl.pause();
+                vidEl.oncanplay = null;
+                vidEl.onended   = null;
+                vidEl.onerror   = null;
+                vidEl.src       = '';
+                vidEl.load();
                 await fetchPlaylist();
                 currentIndex = 0;
                 playNext();

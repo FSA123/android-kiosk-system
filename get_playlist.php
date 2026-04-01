@@ -19,7 +19,7 @@ try {
     if (!empty($rows)) {
         $playlist = array_map(fn($r) => [
             'type' => $r['type'],
-            'src'  => $r['filepath'],
+            'src'  => '/' . ltrim($r['filepath'], '/'),
         ], $rows);
         echo json_encode($playlist);
         exit;
@@ -29,7 +29,7 @@ try {
 }
 
 // ── Filesystem fallback (pre-migration / DB unavailable) ─────────────────
-$dir      = 'media/';
+$dir      = MEDIA_DIR;
 $playlist = [];
 
 if (is_dir($dir)) {
@@ -37,9 +37,9 @@ if (is_dir($dir)) {
     foreach ($files as $file) {
         $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
         if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif'])) {
-            $playlist[] = ['type' => 'image', 'src' => $dir . $file];
+            $playlist[] = ['type' => 'image', 'src' => '/media/' . $file];
         } elseif (in_array($ext, ['mp4', 'webm', 'mov'])) {
-            $playlist[] = ['type' => 'video', 'src' => $dir . $file];
+            $playlist[] = ['type' => 'video', 'src' => '/media/' . $file];
         }
     }
 }
